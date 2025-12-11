@@ -6,8 +6,10 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 import sys
 import pytz 
+import os # <<< CRITICAL FIX: IMPORT OS HERE >>>
 
 # --- CONFIGURATION ---
+# Load secrets from Render Environment Variables
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ASTRO_API_KEY = os.getenv("ASTRO_API_KEY")
 
@@ -16,6 +18,11 @@ URL = "https://json.freeastrologyapi.com/tithi-durations"
 LATITUDE, LONGITUDE = 10.0079, 77.4735 # Theni, Tamil Nadu
 TIMEZONE = 5.5 # IST
 LOCAL_TIMEZONE = pytz.timezone('Asia/Kolkata') 
+
+# Render Webhook Configuration
+PORT = int(os.environ.get('PORT', 8443))
+# Render assigns the URL when the service is created
+WEBHOOK_URL = os.environ.get('WEBHOOK_URL', 'YOUR_RENDER_WEBHOOK_URL_HERE')
 
 # Configure logging
 logging.basicConfig(
@@ -99,7 +106,8 @@ def format_tithi_table(tithi_data, dt_obj):
     
     # --- Telegram MarkdownV2 Output Construction ---
     output = f"✨ *Tithi Details for:* `{query_date_str}`\n"
-    output += f"_Time of Calculation: {query_time_str} IST \(Theni, TN\)_ \n\n"
+    # FIXED SyntaxWarning: use 'rf' prefix here
+    output += rf"_Time of Calculation: {query_time_str} IST \(Theni, TN\)_ \n\n"
     
     output += f"*Current Tithi:* *_{tithi_name}_*\n\n"
     
@@ -118,8 +126,8 @@ def format_tithi_table(tithi_data, dt_obj):
     output += f"Remaining         | {left_percentage}%\n"
     output += "```"
     
-    # Escape periods for the final MarkdownV2 output
-    return output.replace('.', '\.')
+    # FIXED SyntaxWarning: use 'r' prefix for the replacement value
+    return output.replace('.', r'\.')
 
 # ----------------------------------------------------------------------
 # TELEGRAM BOT HANDLERS
@@ -155,7 +163,7 @@ async def tithi_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         utc_time = update.message.date
         local_time_ist = utc_time.astimezone(LOCAL_TIMEZONE)
         
-        # 3. CONSTRUCT THE FINAL DATETIME OBJECT (Robust fix for all dates)
+        # 3. CONSTRUCT THE FINAL DATETIME OBJECT
         input_dt = datetime(
             user_date.year, 
             user_date.month, 
@@ -197,23 +205,33 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_markdown_v2(help_text)
 
 # ----------------------------------------------------------------------
-# MAIN BOT RUNNER
+# MAIN BOT RUNNER (Using Webhook)
 # ----------------------------------------------------------------------
 
 def main() -> None:
-    """Start the bot."""
-    if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
-        print("❌ ERROR: Please set your TELEGRAM_BOT_TOKEN.")
+    """Start the bot using the Render webhook."""
+    if not TELEGRAM_BOT_TOKEN:
+        logger.error("❌ ERROR: TELEGRAM_BOT_TOKEN not found in environment variables.")
         sys.exit(1)
-        
+    
+    if WEBHOOK_URL == 'YOUR_RENDER_WEBHOOK_URL_HERE':
+        logger.warning("⚠️ WARNING: WEBHOOK_URL is still the placeholder. Update it with your live Render URL.")
+
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("tithi", tithi_command))
 
-    print("Bot is running... Press Ctrl-C to stop.")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    # --- Start the Webhook ---
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=TELEGRAM_BOT_TOKEN,
+        webhook_url=WEBHOOK_URL + TELEGRAM_BOT_TOKEN,
+        drop_pending_updates=True
+    )
+    logger.info(f"Bot started successfully on webhook URL path: {WEBHOOK_URL + TELEGRAM_BOT_TOKEN}")
 
 
 if __name__ == '__main__':
