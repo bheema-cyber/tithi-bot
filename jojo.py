@@ -6,7 +6,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 import sys
 import pytz 
-import os # <<< CRITICAL FIX: IMPORT OS HERE >>>
+import os 
 
 # --- CONFIGURATION ---
 # Load secrets from Render Environment Variables
@@ -32,7 +32,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ----------------------------------------------------------------------
-# API AND PARSING FUNCTIONS
+# API AND PARSING FUNCTIONS (No Change)
 # ----------------------------------------------------------------------
 
 def build_api_payload(dt_obj):
@@ -106,7 +106,6 @@ def format_tithi_table(tithi_data, dt_obj):
     
     # --- Telegram MarkdownV2 Output Construction ---
     output = f"✨ *Tithi Details for:* `{query_date_str}`\n"
-    # FIXED SyntaxWarning: use 'rf' prefix here
     output += rf"_Time of Calculation: {query_time_str} IST \(Theni, TN\)_ \n\n"
     
     output += f"*Current Tithi:* *_{tithi_name}_*\n\n"
@@ -126,11 +125,10 @@ def format_tithi_table(tithi_data, dt_obj):
     output += f"Remaining         | {left_percentage}%\n"
     output += "```"
     
-    # FIXED SyntaxWarning: use 'r' prefix for the replacement value
     return output.replace('.', r'\.')
 
 # ----------------------------------------------------------------------
-# TELEGRAM BOT HANDLERS
+# TELEGRAM BOT HANDLERS (No Change)
 # ----------------------------------------------------------------------
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -228,10 +226,11 @@ def main() -> None:
         listen="0.0.0.0",
         port=PORT,
         url_path=TELEGRAM_BOT_TOKEN,
-        webhook_url=WEBHOOK_URL + TELEGRAM_BOT_TOKEN,
+        # FIXED: Add '/' to ensure the URL path is properly formatted for Telegram.
+        webhook_url=WEBHOOK_URL + '/' + TELEGRAM_BOT_TOKEN,
         drop_pending_updates=True
     )
-    logger.info(f"Bot started successfully on webhook URL path: {WEBHOOK_URL + TELEGRAM_BOT_TOKEN}")
+    logger.info(f"Bot started successfully on webhook URL path: {WEBHOOK_URL + '/' + TELEGRAM_BOT_TOKEN}")
 
 
 if __name__ == '__main__':
