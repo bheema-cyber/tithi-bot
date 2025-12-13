@@ -7,6 +7,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 import sys
 import pytz 
 import os 
+import re # <<< NEW IMPORT for escaping special characters >>>
 
 # --- CONFIGURATION ---
 # Load secrets from Render Environment Variables
@@ -14,15 +15,13 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ASTRO_API_KEY = os.getenv("ASTRO_API_KEY")
 
 # API Endpoint and Constant Location Data 
-# UPDATED URL to use the complete-panchang endpoint based on user's confirmation
-URL = "https://json.freeastrologyapi.com/complete-panchang"
+URL = "[https://json.freeastrologyapi.com/complete-panchang](https://json.freeastrologyapi.com/complete-panchang)"
 LATITUDE, LONGITUDE = 10.0079, 77.4735 # Theni, Tamil Nadu
 TIMEZONE = 5.5 # IST
 LOCAL_TIMEZONE = pytz.timezone('Asia/Kolkata') 
 
 # Render Webhook Configuration
 PORT = int(os.environ.get('PORT', 8443))
-# Render assigns the URL when the service is created
 WEBHOOK_URL = os.environ.get('WEBHOOK_URL', 'YOUR_RENDER_WEBHOOK_URL_HERE')
 
 # Configure logging
@@ -57,40 +56,49 @@ def fetch_panchang_data(payload):
     
     try:
         response = requests.request("POST", URL, headers=headers, data=payload, timeout=10)
+        # 403 Error will trigger a RequestException here
         response.raise_for_status() 
 
         panchang_data = response.json()
         
-        # REMOVED double-parsing logic as complete-panchang returns clean JSON
-        
-        # Check if the API returned an error (e.g., if API key is invalid)
         if "error" in panchang_data:
             return {"error": panchang_data["error"]}
         
-        # If no explicit error key, return the data
         return panchang_data
 
     except requests.exceptions.RequestException as e:
         logger.error(f"API Request failed: {e}")
-        return {"error": f"API request failed: Check network or API service status."}
+        # The 403 error is caught here. Return a simple message to avoid MarkdownV2 crash.
+        return {"error": f"API request failed: Check API Key/Access for this endpoint. Error: {e.response.status_code}"}
     except json.JSONDecodeError:
         return {"error": "Failed to decode the Panchang data from the API response."}
     except Exception:
         return {"error": f"An unexpected error occurred during API fetch."}
+
+# IMPROVED MARKDOWN ESCAPING
+def escape_markdown_v2(text):
+    """Escapes special characters for MarkdownV2, except those inside code blocks."""
+    # List of characters to escape: _, *, [, ], (, ), ~, `, >, #, +, -, =, |, {, }, ., !
+    # We escape most common ones that appear in plain text parts of the output
+    # Leaving '/' out for now as it's often used in URLs, but may need escaping later.
+    special_chars = r"([.*_`\-\[\]()~>#+=|{}\.!])"
+    return re.sub(special_chars, r'\\\1', text)
 
 
 def format_panchang_table(panchang_data, dt_obj):
     """Formats the Complete Panchang data into a rich-text MarkdownV2 message for Telegram."""
     
     if panchang_data.get("error"):
-        return f"❌ *Error:* {panchang_data['error']}"
+        # We must escape the error text itself before sending!
+        safe_error_text = escape_markdown_v2(panchang_data['error'])
+        return f"❌ *Error:* {safe_error_text}"
 
     # --- Helper to format completion time ---
     def format_completion_time(iso_time):
         if not iso_time: return "N/A"
         try:
-            # The API returns time in YYYY-MM-DD HH:MM:SS format
             dt = datetime.strptime(iso_time, '%Y-%m-%d %H:%M:%S')
+            # Using strftime to generate strings without complex markdown characters (except dot in AM/PM)
             return dt.strftime('%I:%M:%S %p, %b %d')
         except ValueError:
             return "N/A"
@@ -102,19 +110,20 @@ def format_panchang_table(panchang_data, dt_obj):
     karana1 = panchang_data.get("karana", {}).get("1", {})
     
     # --- Date/Time & Location Info ---
-    query_date_str = dt_obj.strftime("%A, %B %d, %Y")
-    query_time_str = dt_obj.strftime("%I:%M:%S %p")
+    # Escape the plain text parts *before* combining them
+    query_date_str = escape_markdown_v2(dt_obj.strftime("%A, %B %d, %Y"))
+    query_time_str = escape_markdown_v2(dt_obj.strftime("%I:%M:%S %p"))
     sun_rise = panchang_data.get("sun_rise", "N/A")
     sun_set = panchang_data.get("sun_set", "N/A")
 
     # --- MarkdownV2 Output Construction ---
     output = f"🕉️ *Panchang Details for:* `{query_date_str}`\n"
     output += rf"_Time of Calculation: {query_time_str} IST \(Theni, TN\)_ \n"
-    output += rf"_Sunrise: {sun_rise} | Sunset: {sun_set}_\n\n"
+    output += f"_Sunrise: {sun_rise} | Sunset: {sun_set}_\n\n"
     
     # --- TITHI SECTION ---
     output += "*🌙 Tithi \(Lunar Day\):*\n"
-    output += "```\n"
+    output += "```\n" # Code block auto-escapes content
     output += f"Name: {tithi.get('name', 'N/A').title()} ({tithi.get('number', 'N/A')})\n"
     output += f"Paksha: {tithi.get('paksha', 'N/A').title()}\n"
     output += f"Completes: {format_completion_time(tithi.get('completes_at'))}\n"
@@ -139,11 +148,11 @@ def format_panchang_table(panchang_data, dt_obj):
     output += f"Karana Completion: {format_completion_time(karana1.get('completion'))}\n"
     output += "```"
 
-    # FINAL STEP: Escape MarkdownV2 special characters 
-    return output.replace('.', r'\.').replace('-', r'\-')
+    # No need for a final global replace, as individual strings are now escaped.
+    return output
 
 # ----------------------------------------------------------------------
-# TELEGRAM BOT HANDLERS
+# TELEGRAM BOT HANDLERS (No changes needed here)
 # ----------------------------------------------------------------------
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -217,7 +226,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_markdown_v2(help_text)
 
 # ----------------------------------------------------------------------
-# MAIN BOT RUNNER (Using Webhook)
+# MAIN BOT RUNNER (No changes needed here)
 # ----------------------------------------------------------------------
 
 def main() -> None:
