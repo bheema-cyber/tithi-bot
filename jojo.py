@@ -7,7 +7,8 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 import sys
 import pytz 
 import os 
-import re # <<< NEW IMPORT for escaping special characters >>>
+import re 
+from requests.exceptions import RequestException
 
 # --- CONFIGURATION ---
 # Load secrets from Render Environment Variables
@@ -15,7 +16,8 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ASTRO_API_KEY = os.getenv("ASTRO_API_KEY")
 
 # API Endpoint and Constant Location Data 
-URL = "[https://json.freeastrologyapi.com/complete-panchang](https://json.freeastrologyapi.com/complete-panchang)"
+# FIX: Cleaned up the URL string to remove accidental Markdown formatting []()
+URL = "https://json.freeastrologyapi.com/complete-panchang"
 LATITUDE, LONGITUDE = 10.0079, 77.4735 # Theni, Tamil Nadu
 TIMEZONE = 5.5 # IST
 LOCAL_TIMEZONE = pytz.timezone('Asia/Kolkata') 
@@ -51,12 +53,16 @@ def build_api_payload(dt_obj):
     })
 
 def fetch_panchang_data(payload):
-    """Sends the request to the Panchang API and returns the parsed data dictionary."""
+    """
+    Sends the request to the Panchang API and returns the parsed data dictionary.
+    Includes robust error handling for connection and HTTP status issues.
+    """
     headers = {'Content-Type': 'application/json', 'x-api-key': ASTRO_API_KEY}
     
     try:
         response = requests.request("POST", URL, headers=headers, data=payload, timeout=10)
-        # 403 Error will trigger a RequestException here
+        
+        # This will raise an exception for 4xx or 5xx errors
         response.raise_for_status() 
 
         panchang_data = response.json()
@@ -66,22 +72,31 @@ def fetch_panchang_data(payload):
         
         return panchang_data
 
-    except requests.exceptions.RequestException as e:
+    # CATCHING ALL REQUEST EXCEPTIONS (connection, timeout, invalid schema, 403, 500, etc.)
+    except RequestException as e:
         logger.error(f"API Request failed: {e}")
-        # The 403 error is caught here. Return a simple message to avoid MarkdownV2 crash.
-        return {"error": f"API request failed: Check API Key/Access for this endpoint. Error: {e.response.status_code}"}
+        
+        # Robustly determine the status code or error type
+        if e.response is not None:
+            # We got a response, but it was an error code (e.g., 403 Forbidden)
+            status_message = f"HTTP Error {e.response.status_code}"
+        else:
+            # No response (connection error, timeout, or InvalidSchema)
+            status_message = f"Connection Error: {e.__class__.__name__}"
+            
+        return {"error": f"API request failed: {status_message}. Check your URL/API Key and network connectivity."}
+        
     except json.JSONDecodeError:
         return {"error": "Failed to decode the Panchang data from the API response."}
     except Exception:
         return {"error": f"An unexpected error occurred during API fetch."}
 
-# IMPROVED MARKDOWN ESCAPING
+
 def escape_markdown_v2(text):
-    """Escapes special characters for MarkdownV2, except those inside code blocks."""
+    """Escapes special characters for MarkdownV2 in plain text outside code blocks."""
     # List of characters to escape: _, *, [, ], (, ), ~, `, >, #, +, -, =, |, {, }, ., !
-    # We escape most common ones that appear in plain text parts of the output
-    # Leaving '/' out for now as it's often used in URLs, but may need escaping later.
-    special_chars = r"([.*_`\-\[\]()~>#+=|{}\.!])"
+    special_chars = r"([.*_`\-\[\]()~>#+=|{}\!])"
+    # We substitute all these with a backslash before the character
     return re.sub(special_chars, r'\\\1', text)
 
 
@@ -98,7 +113,7 @@ def format_panchang_table(panchang_data, dt_obj):
         if not iso_time: return "N/A"
         try:
             dt = datetime.strptime(iso_time, '%Y-%m-%d %H:%M:%S')
-            # Using strftime to generate strings without complex markdown characters (except dot in AM/PM)
+            # Using strftime for formatting
             return dt.strftime('%I:%M:%S %p, %b %d')
         except ValueError:
             return "N/A"
@@ -110,7 +125,6 @@ def format_panchang_table(panchang_data, dt_obj):
     karana1 = panchang_data.get("karana", {}).get("1", {})
     
     # --- Date/Time & Location Info ---
-    # Escape the plain text parts *before* combining them
     query_date_str = escape_markdown_v2(dt_obj.strftime("%A, %B %d, %Y"))
     query_time_str = escape_markdown_v2(dt_obj.strftime("%I:%M:%S %p"))
     sun_rise = panchang_data.get("sun_rise", "N/A")
@@ -118,8 +132,8 @@ def format_panchang_table(panchang_data, dt_obj):
 
     # --- MarkdownV2 Output Construction ---
     output = f"🕉️ *Panchang Details for:* `{query_date_str}`\n"
-    output += rf"_Time of Calculation: {query_time_str} IST \(Theni, TN\)_ \n"
-    output += f"_Sunrise: {sun_rise} | Sunset: {sun_set}_\n\n"
+    output += rf"_Time of Query: {query_time_str} IST \| Theni, TN_ \n"
+    output += f"_Sunrise: {sun_rise} \| Sunset: {sun_set}_\n\n"
     
     # --- TITHI SECTION ---
     output += "*🌙 Tithi \(Lunar Day\):*\n"
@@ -148,22 +162,28 @@ def format_panchang_table(panchang_data, dt_obj):
     output += f"Karana Completion: {format_completion_time(karana1.get('completion'))}\n"
     output += "```"
 
-    # No need for a final global replace, as individual strings are now escaped.
+    # The final output is ready to be sent
     return output
 
 # ----------------------------------------------------------------------
-# TELEGRAM BOT HANDLERS (No changes needed here)
+# TELEGRAM BOT HANDLERS
 # ----------------------------------------------------------------------
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Sends a welcome message."""
+    """Sends a welcome message and lists main trigger."""
     user = update.effective_user
-    await update.message.reply_markdown_v2(
-        rf"Hello, {user.mention_markdown_v2()}! I am your Panchang Bot\. "
-        rf"Send me a date with the `/panchang` command in the format `DD-MM-YYYY`\. "
-        rf"The calculation will use the exact time you sent the message, converted to IST\. "
-        rf"Example: `/panchang 13-12-2025`"
+    
+    # Use MarkdownV2 escaping where necessary
+    welcome_message = (
+        rf"Hello, {user.mention_markdown_v2()} I am your **Panchang Bot**\.\n\n"
+        rf"My primary function is to provide the five elements of the Hindu calendar for any given date in a single, detailed report\. \n\n"
+        rf"👉 **Primary Trigger:**\n"
+        rf"*/panchang DD\-MM\-YYYY* \- Get the full report for the date\. \n"
+        rf"Example: `/panchang 13\-12\-2025`\n\n"
+        rf"Use `/help` to see all available commands\."
     )
+    
+    await update.message.reply_markdown_v2(welcome_message)
 
 async def panchang_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -216,17 +236,24 @@ async def panchang_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a message when the command /help is issued."""
     help_text = (
-        r"This bot provides Full Panchang \(Tithi, Nakshatra, Yoga, Karana\) details\. \n\n"
-        r"Commands:\n"
-        r"*/start* \- Start the bot\.\n"
-        r"*/panchang DD\-MM\-YYYY* \- Get Full Panchang details for the specified date\. \n"
+        r"***Available Triggers & Information***\n\n"
+        r"**Commands:**\n"
+        r"*/start* \- See the welcome message and basic instructions\.\n"
+        r"*/help* \- View this comprehensive list of commands\.\n\n"
+        r"**Panchang Report:**\n"
+        r"*/panchang DD\-MM\-YYYY* \- The main command\. Provides a full report including:\n"
+        r"  \- 🌙 Tithi \(Lunar Day\)\n"
+        r"  \- ⭐ Nakshatra \(Lunar Mansion\)\n"
+        r"  \- 🧘 Yoga \(Auspicious Combination\)\n"
+        r"  \- 🔱 Karana \(Half Tithi\)\n"
+        r"  \- 🌅 Sunrise/Sunset Timings\n\n"
         r"Example: `/panchang 13\-12\-2025`\n\n"
-        r"_Calculations are based on Theni, TN coordinates \(IST\) and Lahiri Ayanaamsha\._"
+        r"_All calculations use the UTC time the message is sent, convert it to IST, and are anchored to the coordinates of Theni, TN \(Lahiri Ayanaamsha\)\._"
     )
     await update.message.reply_markdown_v2(help_text)
 
 # ----------------------------------------------------------------------
-# MAIN BOT RUNNER (No changes needed here)
+# MAIN BOT RUNNER
 # ----------------------------------------------------------------------
 
 def main() -> None:
