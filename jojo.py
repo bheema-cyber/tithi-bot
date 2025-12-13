@@ -14,7 +14,8 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ASTRO_API_KEY = os.getenv("ASTRO_API_KEY")
 
 # API Endpoint and Constant Location Data 
-URL = "https://json.freeastrologyapi.com/tithi-durations"
+# UPDATED URL to use the complete-panchang endpoint based on user's confirmation
+URL = "https://json.freeastrologyapi.com/complete-panchang"
 LATITUDE, LONGITUDE = 10.0079, 77.4735 # Theni, Tamil Nadu
 TIMEZONE = 5.5 # IST
 LOCAL_TIMEZONE = pytz.timezone('Asia/Kolkata') 
@@ -32,11 +33,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ----------------------------------------------------------------------
-# API AND PARSING FUNCTIONS (No Change)
+# API AND PARSING FUNCTIONS
 # ----------------------------------------------------------------------
 
 def build_api_payload(dt_obj):
-    """Constructs the JSON payload for the Tithi API request."""
+    """Constructs the JSON payload for the Complete Panchang API request."""
     return json.dumps({
         "year": dt_obj.year, 
         "month": dt_obj.month, 
@@ -50,105 +51,118 @@ def build_api_payload(dt_obj):
         "config": {"observation_point": "topocentric", "ayanamsha": "lahiri"}
     })
 
-def fetch_tithi_data(payload):
-    """Sends the request to the Tithi API and returns the parsed Tithi dictionary."""
+def fetch_panchang_data(payload):
+    """Sends the request to the Panchang API and returns the parsed data dictionary."""
     headers = {'Content-Type': 'application/json', 'x-api-key': ASTRO_API_KEY}
     
     try:
         response = requests.request("POST", URL, headers=headers, data=payload, timeout=10)
         response.raise_for_status() 
 
-        main_data = response.json()
+        panchang_data = response.json()
         
-        # --- Robust Double-Parsing Logic ---
-        raw_json_str_quoted = main_data.get("output")
-        if not raw_json_str_quoted:
-            return None
+        # REMOVED double-parsing logic as complete-panchang returns clean JSON
         
-        inner_string_value = json.loads(raw_json_str_quoted)
-        tithi_obj = json.loads(inner_string_value)
-        return tithi_obj
+        # Check if the API returned an error (e.g., if API key is invalid)
+        if "error" in panchang_data:
+            return {"error": panchang_data["error"]}
+        
+        # If no explicit error key, return the data
+        return panchang_data
 
     except requests.exceptions.RequestException as e:
         logger.error(f"API Request failed: {e}")
         return {"error": f"API request failed: Check network or API service status."}
     except json.JSONDecodeError:
-        return {"error": "Failed to decode the Tithi data from the API response."}
+        return {"error": "Failed to decode the Panchang data from the API response."}
     except Exception:
         return {"error": f"An unexpected error occurred during API fetch."}
 
 
-def format_tithi_table(tithi_data, dt_obj):
-    """Formats the Tithi data into a rich-text MarkdownV2 table for Telegram."""
+def format_panchang_table(panchang_data, dt_obj):
+    """Formats the Complete Panchang data into a rich-text MarkdownV2 message for Telegram."""
     
-    if tithi_data.get("error"):
-        return f"❌ *Error:* {tithi_data['error']}"
+    if panchang_data.get("error"):
+        return f"❌ *Error:* {panchang_data['error']}"
 
-    # --- Data Extraction ---
-    tithi_name = tithi_data.get("name", "N/A").title()
-    tithi_number = tithi_data.get("number", "N/A")
-    paksha = tithi_data.get("paksha", "N/A").title()
-    completes_at = tithi_data.get("completes_at", "N/A")
-    left_percentage = tithi_data.get("left_precentage", "N/A")
-
-    # --- Date/Time Formatting ---
-    completion_time_str, completion_date_str = "N/A", "N/A"
-    if completes_at != "N/A":
+    # --- Helper to format completion time ---
+    def format_completion_time(iso_time):
+        if not iso_time: return "N/A"
         try:
-            completion_dt = datetime.strptime(completes_at, '%Y-%m-%d %H:%M:%S')
-            completion_time_str = completion_dt.strftime('%I:%M:%S %p')
-            completion_date_str = completion_dt.strftime('%A, %B %d, %Y')
+            # The API returns time in YYYY-MM-DD HH:MM:SS format
+            dt = datetime.strptime(iso_time, '%Y-%m-%d %H:%M:%S')
+            return dt.strftime('%I:%M:%S %p, %b %d')
         except ValueError:
-            pass
+            return "N/A"
+
+    # --- Extract Major Panchang Components ---
+    tithi = panchang_data.get("tithi", {})
+    nakshatra = panchang_data.get("nakshatra", {})
+    yoga1 = panchang_data.get("yoga", {}).get("1", {})
+    karana1 = panchang_data.get("karana", {}).get("1", {})
     
+    # --- Date/Time & Location Info ---
     query_date_str = dt_obj.strftime("%A, %B %d, %Y")
     query_time_str = dt_obj.strftime("%I:%M:%S %p")
+    sun_rise = panchang_data.get("sun_rise", "N/A")
+    sun_set = panchang_data.get("sun_set", "N/A")
+
+    # --- MarkdownV2 Output Construction ---
+    output = f"🕉️ *Panchang Details for:* `{query_date_str}`\n"
+    output += rf"_Time of Calculation: {query_time_str} IST \(Theni, TN\)_ \n"
+    output += rf"_Sunrise: {sun_rise} | Sunset: {sun_set}_\n\n"
     
-    # --- Telegram MarkdownV2 Output Construction ---
-    output = f"✨ *Tithi Details for:* `{query_date_str}`\n"
-    output += rf"_Time of Calculation: {query_time_str} IST \(Theni, TN\)_ \n\n"
-    
-    output += f"*Current Tithi:* *_{tithi_name}_*\n\n"
-    
-    # Use code block formatting for a clean table appearance in Telegram
+    # --- TITHI SECTION ---
+    output += "*🌙 Tithi \(Lunar Day\):*\n"
     output += "```\n"
-    output += f"Attribute         | Value\n"
-    output += f"------------------|----------------------\n"
-    output += f"Tithi Name        | {tithi_name} ({tithi_number})\n"
+    output += f"Name: {tithi.get('name', 'N/A').title()} ({tithi.get('number', 'N/A')})\n"
+    output += f"Paksha: {tithi.get('paksha', 'N/A').title()}\n"
+    output += f"Completes: {format_completion_time(tithi.get('completes_at'))}\n"
+    output += f"Remaining: {tithi.get('left_precentage', 'N/A')}%\n"
+    output += "```\n"
+
+    # --- NAKSHATRA SECTION ---
+    output += "*⭐ Nakshatra \(Lunar Mansion\):*\n"
+    output += "```\n"
+    output += f"Name: {nakshatra.get('name', 'N/A').title()} ({nakshatra.get('number', 'N/A')})\n"
+    output += f"Starts: {format_completion_time(nakshatra.get('starts_at'))}\n"
+    output += f"Ends: {format_completion_time(nakshatra.get('ends_at'))}\n"
+    output += f"Remaining: {nakshatra.get('left_percentage', 'N/A')}%\n"
+    output += "```\n"
     
-    paksha_desc = "Waning Moon (Krishna)" if paksha == "Krishna" else "Waxing Moon (Shukla)"
-    output += f"Paksha            | {paksha_desc}\n"
-    
-    output += f"Completes Time    | {completion_time_str}\n"
-    output += f"Completes Date    | {completion_date_str}\n"
-    
-    output += f"Remaining         | {left_percentage}%\n"
+    # --- YOGA & KARANA SECTION ---
+    output += "*🧘 Yoga & Karana:*\n"
+    output += "```\n"
+    output += f"Yoga: {yoga1.get('name', 'N/A').title()} ({yoga1.get('number', 'N/A')})\n"
+    output += f"Yoga Completion: {format_completion_time(yoga1.get('completion'))}\n"
+    output += f"Karana: {karana1.get('name', 'N/A').title()} ({karana1.get('number', 'N/A')})\n"
+    output += f"Karana Completion: {format_completion_time(karana1.get('completion'))}\n"
     output += "```"
-    
-    return output.replace('.', r'\.')
+
+    # FINAL STEP: Escape MarkdownV2 special characters 
+    return output.replace('.', r'\.').replace('-', r'\-')
 
 # ----------------------------------------------------------------------
-# TELEGRAM BOT HANDLERS (No Change)
+# TELEGRAM BOT HANDLERS
 # ----------------------------------------------------------------------
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a welcome message."""
     user = update.effective_user
     await update.message.reply_markdown_v2(
-        rf"Hello, {user.mention_markdown_v2()}! I am your Tithi Calendar Bot\. "
-        rf"Send me a date with the `/tithi` command in the format `DD-MM-YYYY`\. "
+        rf"Hello, {user.mention_markdown_v2()}! I am your Panchang Bot\. "
+        rf"Send me a date with the `/panchang` command in the format `DD-MM-YYYY`\. "
         rf"The calculation will use the exact time you sent the message, converted to IST\. "
-        rf"Example: `/tithi 11-12-2025`"
+        rf"Example: `/panchang 13-12-2025`"
     )
 
-async def tithi_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def panchang_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Handles the /tithi command, ensuring the Tithi is calculated for the 
-    user-specified date at the current moment in IST.
+    Handles the /panchang command, fetching and displaying complete Panchang details.
     """
     
     if not context.args:
-        await update.message.reply_text("Please provide a date in the format DD-MM-YYYY. Example: /tithi 11-12-2025")
+        await update.message.reply_text("Please provide a date in the format DD-MM-YYYY. Example: /panchang 13-12-2025")
         return
 
     date_str = context.args[0]
@@ -172,18 +186,18 @@ async def tithi_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         
     except ValueError:
-        await update.message.reply_text(f"❌ Invalid date format: '{date_str}'. Please use DD-MM-YYYY (e.g., 11-12-2025).")
+        await update.message.reply_text(f"❌ Invalid date format: '{date_str}'. Please use DD-MM-YYYY (e.g., 13-12-2025).")
         return
 
     # 4. Build Payload
     payload = build_api_payload(input_dt)
     
     # 5. Fetch Data
-    await update.message.reply_text(f"⏳ Fetching Tithi details for {input_dt.strftime('%d-%m-%Y')} at {input_dt.strftime('%H:%M:%S')} (Theni, IST)...")
-    tithi_data = fetch_tithi_data(payload)
+    await update.message.reply_text(f"⏳ Fetching Full Panchang details for {input_dt.strftime('%d-%m-%Y')} at {input_dt.strftime('%H:%M:%S')} (Theni, IST)...")
+    panchang_data = fetch_panchang_data(payload)
     
     # 6. Format and Send
-    response_text = format_tithi_table(tithi_data, input_dt)
+    response_text = format_panchang_table(panchang_data, input_dt)
     
     await update.message.reply_markdown_v2(
         response_text 
@@ -193,11 +207,11 @@ async def tithi_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a message when the command /help is issued."""
     help_text = (
-        r"This bot provides Tithi (Lunar Day) details based on Indian Astrology principles\. \n\n"
+        r"This bot provides Full Panchang \(Tithi, Nakshatra, Yoga, Karana\) details\. \n\n"
         r"Commands:\n"
         r"*/start* \- Start the bot\.\n"
-        r"*/tithi DD\-MM\-YYYY* \- Get Tithi details for the specified date\. The calculation uses the exact time the message is received\. \n"
-        r"Example: `/tithi 11\-12\-2025`\n\n"
+        r"*/panchang DD\-MM\-YYYY* \- Get Full Panchang details for the specified date\. \n"
+        r"Example: `/panchang 13\-12\-2025`\n\n"
         r"_Calculations are based on Theni, TN coordinates \(IST\) and Lahiri Ayanaamsha\._"
     )
     await update.message.reply_markdown_v2(help_text)
@@ -219,15 +233,14 @@ def main() -> None:
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("tithi", tithi_command))
+    application.add_handler(CommandHandler("panchang", panchang_command))
 
     # --- Start the Webhook ---
     application.run_webhook(
         listen="0.0.0.0",
         port=PORT,
         url_path=TELEGRAM_BOT_TOKEN,
-        # FIXED: Add '/' to ensure the URL path is properly formatted for Telegram.
-        webhook_url=WEBHOOK_URL + '/' + TELEGRAM_BOT_TOKEN,
+        webhook_url=WEBHOOK_URL + '/' + TELEGRAM_BOT_TOKEN, 
         drop_pending_updates=True
     )
     logger.info(f"Bot started successfully on webhook URL path: {WEBHOOK_URL + '/' + TELEGRAM_BOT_TOKEN}")
