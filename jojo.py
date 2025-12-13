@@ -10,13 +10,14 @@ import os
 import re 
 from requests.exceptions import RequestException
 
-# --- CONFIGURATION ---
-# Load secrets from Render Environment Variables
+# --- CRITICAL CONFIGURATION ---
+# IMPORTANT: Ensure ASTRO_API_KEY environment variable in Render is correct 
+# and has access to the /complete-panchang endpoint (this is the source of the 403 error).
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ASTRO_API_KEY = os.getenv("ASTRO_API_KEY")
 
 # API Endpoint and Constant Location Data 
-# FIX: Cleaned up the URL string to remove accidental Markdown formatting []()
+# Using the full Panchang endpoint based on your confirmed working sample output.
 URL = "https://json.freeastrologyapi.com/complete-panchang"
 LATITUDE, LONGITUDE = 10.0079, 77.4735 # Theni, Tamil Nadu
 TIMEZONE = 5.5 # IST
@@ -55,36 +56,34 @@ def build_api_payload(dt_obj):
 def fetch_panchang_data(payload):
     """
     Sends the request to the Panchang API and returns the parsed data dictionary.
-    Includes robust error handling for connection and HTTP status issues.
+    Includes robust error handling.
     """
     headers = {'Content-Type': 'application/json', 'x-api-key': ASTRO_API_KEY}
     
     try:
         response = requests.request("POST", URL, headers=headers, data=payload, timeout=10)
         
-        # This will raise an exception for 4xx or 5xx errors
+        # This will raise an exception for 4xx or 5xx errors (like 403 Forbidden)
         response.raise_for_status() 
 
         panchang_data = response.json()
         
+        # Check if the API returned an explicit error object
         if "error" in panchang_data:
             return {"error": panchang_data["error"]}
         
         return panchang_data
 
-    # CATCHING ALL REQUEST EXCEPTIONS (connection, timeout, invalid schema, 403, 500, etc.)
+    # CATCHING ALL REQUEST EXCEPTIONS
     except RequestException as e:
         logger.error(f"API Request failed: {e}")
         
-        # Robustly determine the status code or error type
         if e.response is not None:
-            # We got a response, but it was an error code (e.g., 403 Forbidden)
             status_message = f"HTTP Error {e.response.status_code}"
         else:
-            # No response (connection error, timeout, or InvalidSchema)
             status_message = f"Connection Error: {e.__class__.__name__}"
             
-        return {"error": f"API request failed: {status_message}. Check your URL/API Key and network connectivity."}
+        return {"error": f"API request failed: {status_message}. Please confirm your ASTRO_API_KEY has access to the '/complete-panchang' endpoint."}
         
     except json.JSONDecodeError:
         return {"error": "Failed to decode the Panchang data from the API response."}
@@ -94,9 +93,8 @@ def fetch_panchang_data(payload):
 
 def escape_markdown_v2(text):
     """Escapes special characters for MarkdownV2 in plain text outside code blocks."""
-    # List of characters to escape: _, *, [, ], (, ), ~, `, >, #, +, -, =, |, {, }, ., !
+    # Escapes: *, _, `, ., -, [, ], (, ), ~, >, #, +, =, |, {, }, !
     special_chars = r"([.*_`\-\[\]()~>#+=|{}\!])"
-    # We substitute all these with a backslash before the character
     return re.sub(special_chars, r'\\\1', text)
 
 
@@ -104,7 +102,6 @@ def format_panchang_table(panchang_data, dt_obj):
     """Formats the Complete Panchang data into a rich-text MarkdownV2 message for Telegram."""
     
     if panchang_data.get("error"):
-        # We must escape the error text itself before sending!
         safe_error_text = escape_markdown_v2(panchang_data['error'])
         return f"❌ *Error:* {safe_error_text}"
 
@@ -113,7 +110,6 @@ def format_panchang_table(panchang_data, dt_obj):
         if not iso_time: return "N/A"
         try:
             dt = datetime.strptime(iso_time, '%Y-%m-%d %H:%M:%S')
-            # Using strftime for formatting
             return dt.strftime('%I:%M:%S %p, %b %d')
         except ValueError:
             return "N/A"
@@ -125,6 +121,7 @@ def format_panchang_table(panchang_data, dt_obj):
     karana1 = panchang_data.get("karana", {}).get("1", {})
     
     # --- Date/Time & Location Info ---
+    # Escape the parts that go outside the code blocks
     query_date_str = escape_markdown_v2(dt_obj.strftime("%A, %B %d, %Y"))
     query_time_str = escape_markdown_v2(dt_obj.strftime("%I:%M:%S %p"))
     sun_rise = panchang_data.get("sun_rise", "N/A")
@@ -137,7 +134,7 @@ def format_panchang_table(panchang_data, dt_obj):
     
     # --- TITHI SECTION ---
     output += "*🌙 Tithi \(Lunar Day\):*\n"
-    output += "```\n" # Code block auto-escapes content
+    output += "```\n" 
     output += f"Name: {tithi.get('name', 'N/A').title()} ({tithi.get('number', 'N/A')})\n"
     output += f"Paksha: {tithi.get('paksha', 'N/A').title()}\n"
     output += f"Completes: {format_completion_time(tithi.get('completes_at'))}\n"
@@ -162,27 +159,23 @@ def format_panchang_table(panchang_data, dt_obj):
     output += f"Karana Completion: {format_completion_time(karana1.get('completion'))}\n"
     output += "```"
 
-    # The final output is ready to be sent
     return output
 
 # ----------------------------------------------------------------------
-# TELEGRAM BOT HANDLERS
+# TELEGRAM BOT HANDLERS 
 # ----------------------------------------------------------------------
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a welcome message and lists main trigger."""
     user = update.effective_user
-    
-    # Use MarkdownV2 escaping where necessary
     welcome_message = (
         rf"Hello, {user.mention_markdown_v2()} I am your **Panchang Bot**\.\n\n"
-        rf"My primary function is to provide the five elements of the Hindu calendar for any given date in a single, detailed report\. \n\n"
+        rf"My primary function is to provide the full Panchang report for any given date\. \n\n"
         rf"👉 **Primary Trigger:**\n"
-        rf"*/panchang DD\-MM\-YYYY* \- Get the full report for the date\. \n"
+        rf"*/panchang DD\-MM\-YYYY* \- Get the full report\. \n"
         rf"Example: `/panchang 13\-12\-2025`\n\n"
         rf"Use `/help` to see all available commands\."
     )
-    
     await update.message.reply_markdown_v2(welcome_message)
 
 async def panchang_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -197,14 +190,10 @@ async def panchang_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     date_str = context.args[0]
     
     try:
-        # 1. Parse the user's date (DD-MM-YYYY)
         user_date = datetime.strptime(date_str, '%d-%m-%Y')
-        
-        # 2. Get the local IST time from the message timestamp (UTC -> IST)
         utc_time = update.message.date
         local_time_ist = utc_time.astimezone(LOCAL_TIMEZONE)
         
-        # 3. CONSTRUCT THE FINAL DATETIME OBJECT
         input_dt = datetime(
             user_date.year, 
             user_date.month, 
@@ -218,20 +207,16 @@ async def panchang_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.message.reply_text(f"❌ Invalid date format: '{date_str}'. Please use DD-MM-YYYY (e.g., 13-12-2025).")
         return
 
-    # 4. Build Payload
     payload = build_api_payload(input_dt)
     
-    # 5. Fetch Data
     await update.message.reply_text(f"⏳ Fetching Full Panchang details for {input_dt.strftime('%d-%m-%Y')} at {input_dt.strftime('%H:%M:%S')} (Theni, IST)...")
     panchang_data = fetch_panchang_data(payload)
     
-    # 6. Format and Send
     response_text = format_panchang_table(panchang_data, input_dt)
     
     await update.message.reply_markdown_v2(
         response_text 
     )
-
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a message when the command /help is issued."""
@@ -248,7 +233,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         r"  \- 🔱 Karana \(Half Tithi\)\n"
         r"  \- 🌅 Sunrise/Sunset Timings\n\n"
         r"Example: `/panchang 13\-12\-2025`\n\n"
-        r"_All calculations use the UTC time the message is sent, convert it to IST, and are anchored to the coordinates of Theni, TN \(Lahiri Ayanaamsha\)\._"
+        r"_All calculations are anchored to the coordinates of Theni, TN \(Lahiri Ayanaamsha\)\._"
     )
     await update.message.reply_markdown_v2(help_text)
 
